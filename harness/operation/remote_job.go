@@ -43,6 +43,11 @@ type RemoteJobState struct {
 	ResultTruncated  bool           `json:",omitzero"`
 	ErrorBytes       int            `json:",omitzero"`
 	ErrorTruncated   bool           `json:",omitzero"`
+	ResultPath       string         `json:",omitzero"`
+	ErrorPath        string         `json:",omitzero"`
+	// OutputDirectory is the base directory for artifacts holding untruncated
+	// output; empty disables artifact capture.
+	OutputDirectory string `json:",omitzero"`
 }
 
 func NewRemoteJobSpec(plan RemoteJobPlan) (Spec, error) {
