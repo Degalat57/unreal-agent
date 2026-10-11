@@ -1,6 +1,7 @@
 package operation
 
 import (
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,25 @@ const (
 	RemoteJobResultFilename = "result"
 	RemoteJobErrorFilename  = "error"
 )
+
+// prepareRemoteJobOutputDirectory defaults the artifact output directory of a
+// remote job operation so handlers that round-trip its state capture
+// untruncated output; an invalid or already-configured state is left unchanged.
+func prepareRemoteJobOutputDirectory(current *Operation, directory string) {
+	if directory == "" {
+		return
+	}
+	state, err := DecodeRemoteJobState(*current)
+	if err != nil || state.OutputDirectory != "" {
+		return
+	}
+	state.OutputDirectory = directory
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return
+	}
+	current.State = encoded
+}
 
 func prepareRemoteJobOutput(current Operation, state *RemoteJobState) {
 	limit := current.MaxOutputLength

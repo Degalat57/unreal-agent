@@ -132,6 +132,24 @@ func TestRemoteJobSkipsArtifactCaptureForSmallOutput(t *testing.T) {
 	}
 }
 
+func TestLocalOperationManagerDefaultsRemoteJobOutputDirectory(t *testing.T) {
+	handler := newTestRemoteJobHandler()
+	directory := t.TempDir()
+	manager := operation.NewLocalOperationManagerWithRemoteJobOutputDirectory(t.Context(), directory, handler)
+	current := newTestRemoteJobOperation(t, "remote-job")
+	if err := manager.Add(current); err != nil {
+		t.Fatal(err)
+	}
+	added := receiveRemoteJobUpdate(t, handler.adds)
+	state, err := operation.DecodeRemoteJobState(added)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.OutputDirectory != directory {
+		t.Fatalf("output directory = %q, want %q", state.OutputDirectory, directory)
+	}
+}
+
 func TestRemoteJobSkipsArtifactCaptureForEmptyOutput(t *testing.T) {
 	spec, err := operation.NewRemoteJobSpec(operation.RemoteJobPlan{Type: "test", Version: 1, Data: jsontext.Value(`{}`)})
 	if err != nil {

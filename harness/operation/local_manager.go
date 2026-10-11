@@ -9,13 +9,16 @@ import (
 )
 
 type LocalOperationManager struct {
-	ctx             context.Context
-	remoteJobs      *remoteJobHandlers
-	adds            chan localAddRequest
-	cancellations   chan localCancelRequest
-	primitiveEvents chan primitives.PrimitiveEvent
-	updates         chan Operation
-	pendingUpdates  []Operation
+	ctx        context.Context
+	remoteJobs *remoteJobHandlers
+	// remoteJobOutputDirectory is the base directory for remote job output
+	// artifacts; empty disables artifact capture.
+	remoteJobOutputDirectory string
+	adds                     chan localAddRequest
+	cancellations            chan localCancelRequest
+	primitiveEvents          chan primitives.PrimitiveEvent
+	updates                  chan Operation
+	pendingUpdates           []Operation
 }
 
 type localAddRequest struct {
@@ -60,13 +63,22 @@ func (current *localRunningOperation) initialize() error {
 var _ Manager = (*LocalOperationManager)(nil)
 
 func NewLocalOperationManager(ctx context.Context, remoteJobHandlers ...RemoteJobHandler) *LocalOperationManager {
+	return NewLocalOperationManagerWithRemoteJobOutputDirectory(ctx, "", remoteJobHandlers...)
+}
+
+func NewLocalOperationManagerWithRemoteJobOutputDirectory(
+	ctx context.Context,
+	remoteJobOutputDirectory string,
+	remoteJobHandlers ...RemoteJobHandler,
+) *LocalOperationManager {
 	manager := &LocalOperationManager{
-		ctx:             ctx,
-		remoteJobs:      newRemoteJobHandlers(ctx, remoteJobHandlers),
-		adds:            make(chan localAddRequest),
-		cancellations:   make(chan localCancelRequest),
-		primitiveEvents: make(chan primitives.PrimitiveEvent),
-		updates:         make(chan Operation),
+		ctx:                      ctx,
+		remoteJobs:               newRemoteJobHandlers(ctx, remoteJobHandlers),
+		remoteJobOutputDirectory: remoteJobOutputDirectory,
+		adds:                     make(chan localAddRequest),
+		cancellations:            make(chan localCancelRequest),
+		primitiveEvents:          make(chan primitives.PrimitiveEvent),
+		updates:                  make(chan Operation),
 	}
 	go manager.run()
 	return manager
@@ -129,6 +141,7 @@ func (manager *LocalOperationManager) run() {
 				remoteJobHandlerIndex: -1,
 			}
 			if request.operation.Type == TypeRemoteJob {
+				prepareRemoteJobOutputDirectory(&request.operation, manager.remoteJobOutputDirectory)
 				handlerIndex, err := manager.remoteJobs.add(request.operation)
 				if err != nil {
 					manager.failLocalOperation(operations, current, err)

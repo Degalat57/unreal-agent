@@ -356,7 +356,11 @@ func Run(
 		}
 	}
 
-	operations := operation.NewLocalOperationManager(runContext, configuredTools.RemoteJobs...)
+	operations := operation.NewLocalOperationManagerWithRemoteJobOutputDirectory(
+		runContext,
+		operationDirectory,
+		configuredTools.RemoteJobs...,
+	)
 	defer func() {
 		cancel()
 		for range operations.Updates() {
