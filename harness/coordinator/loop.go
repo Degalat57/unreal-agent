@@ -51,6 +51,7 @@ type loopState struct {
 	deliveredInputs   int
 	currentTurnInputs int
 	callModel         bool
+	turnFailure       *llm.Failure
 	grace             <-chan time.Time
 	graceToolCalls    map[toolCallKey]struct{}
 }
@@ -74,6 +75,14 @@ type modelResponseResult struct {
 	turnID   session.TurnID
 	response llm.Response
 	err      error
+}
+
+// failedModelResponse reports whether the provider failed the response
+// outright: the response carries a failure and no stop classification at all,
+// so its output is partial at best. Refusals and truncations keep their own
+// stop reasons and retain the existing, non-terminal behavior.
+func failedModelResponse(response llm.Response) bool {
+	return response.Failure != nil && response.Stop == ""
 }
 
 var _ Coordinator = (*coordinator)(nil)
@@ -131,6 +140,11 @@ func (current *coordinator) Run(ctx context.Context) error {
 			current.clearToolGrace()
 		}
 		if current.stop.request.Mode == inbox.StopWhenIdle && current.isIdle() {
+			if failure := current.state.turnFailure; failure != nil {
+				// Replaying a session whose latest regular turn failed surfaces
+				// the recorded failure instead of exiting successfully.
+				return &TurnFailedError{TurnID: current.state.currentTurnID, Failure: *failure}
+			}
 			return ctx.Err()
 		}
 
@@ -242,6 +256,11 @@ func (current *coordinator) processModelResponse(ctx context.Context, modelRespo
 	})
 	if err != nil {
 		return err
+	}
+	if failure := current.state.turnFailure; failure != nil {
+		// The provider failed the response outright; the failed response is
+		// already durably recorded and its partial output never runs.
+		return &TurnFailedError{TurnID: modelResponse.turnID, Failure: *failure}
 	}
 	for _, status := range statuses {
 		for _, value := range status.Operations {
@@ -581,6 +600,7 @@ func (current *coordinator) addItemToLocalState(
 		// FIXME: Forks leave inherited calls without results and retain pending-input accounting.
 		clear(current.state.toolCalls)
 		clear(current.state.operations)
+		current.state.turnFailure = nil
 		current.clearToolGrace()
 
 	case sessionstore.ItemInput:
@@ -626,6 +646,7 @@ func (current *coordinator) addItemToLocalState(
 		current.state.currentTurnID = turn.ID
 		current.state.currentTurnType = turn.Type
 		current.state.currentTurnInputs = current.state.availableInputs
+		current.state.turnFailure = nil
 		if turn.Type != session.TurnCompaction {
 			current.dependencies.ContextBuilder.Commit()
 		}
@@ -646,6 +667,14 @@ func (current *coordinator) addItemToLocalState(
 		current.dependencies.ContextBuilder.AddModelResponse(response.Response)
 		if response.TurnID == current.state.currentTurnID {
 			current.state.deliveredInputs = current.state.currentTurnInputs
+		}
+		if failedModelResponse(response.Response) {
+			// The provider failed the response, so its partial output is never
+			// dispatched as tool calls, live or on replay.
+			if response.TurnID == current.state.currentTurnID && current.state.currentTurnType == session.TurnRegular {
+				current.state.turnFailure = response.Response.Failure
+			}
+			return item, nil
 		}
 		current.addToolCallsToLocalState(response)
 
