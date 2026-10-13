@@ -89,14 +89,16 @@ func TestExchangeRetryHints(t *testing.T) {
 		name, kind, code, message, header string
 		status                            int
 		want                              time.Duration
+		backoff                           bool // hint below the local backoff: the jittered backoff decides
 	}{
-		{name: "top-level", kind: "error", code: "rate_limit_exceeded", message: "try again in 1.25s", status: 200, want: 1250 * time.Millisecond},
-		{name: "nested", kind: "response.failed", code: "rate_limit_exceeded", message: "try again in 28ms", status: 200, want: 28 * time.Millisecond},
-		{name: "HTTP body", kind: "http", code: "rate_limit_exceeded", message: "try again in 45s", status: 429, want: 30 * time.Second},
-		{name: "HTTP header", kind: "http", status: 503, header: "120", want: 30 * time.Second},
-		{name: "overload header", kind: "http", code: "server_is_overloaded", message: "overloaded", status: 503, header: "90", want: 30 * time.Second},
-		{name: "nested header", kind: "response.failed", code: "rate_limit_exceeded", message: "try again in 1s", status: 200, header: "90", want: 30 * time.Second},
-		{name: "HTTP date", kind: "http", status: 503, header: "date", want: 30 * time.Second},
+		{name: "top-level", kind: "error", code: "rate_limit_exceeded", message: "try again in 1.25s", status: 200, want: 2 * time.Second, backoff: true},
+		{name: "nested", kind: "response.failed", code: "rate_limit_exceeded", message: "try again in 28ms", status: 200, want: 2 * time.Second, backoff: true},
+		{name: "HTTP body", kind: "http", code: "rate_limit_exceeded", message: "try again in 45s", status: 429, want: 45 * time.Second},
+		{name: "HTTP header", kind: "http", status: 503, header: "120", want: 2 * time.Minute},
+		{name: "overload header", kind: "http", code: "server_is_overloaded", message: "overloaded", status: 503, header: "90", want: 90 * time.Second},
+		{name: "overload short header", kind: "http", code: "server_is_overloaded", message: "overloaded", status: 503, header: "5", want: 10 * time.Second, backoff: true},
+		{name: "nested header", kind: "response.failed", code: "rate_limit_exceeded", message: "try again in 1s", status: 200, header: "90", want: 90 * time.Second},
+		{name: "HTTP date", kind: "http", status: 503, header: "date", want: time.Minute},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -116,8 +118,12 @@ func TestExchangeRetryHints(t *testing.T) {
 					t.Fatal(err)
 				}
 				response, err := adapter.Respond(t.Context(), validRequest(), llm.RequestOptions{})
-				if len(transport.calls) != 2 || transport.calls[1].Sub(transport.calls[0]) != test.want {
+				if len(transport.calls) != 2 {
 					t.Fatalf("request times=%v response=%#v error=%v", transport.calls, response, err)
+				}
+				delay := transport.calls[1].Sub(transport.calls[0])
+				if exact := delay == test.want; test.backoff && (delay < test.want*4/5 || delay > test.want) || !test.backoff && !exact {
+					t.Fatalf("delay=%s want=%s (backoff=%t)", delay, test.want, test.backoff)
 				}
 				if test.code != "" {
 					assertResponseError(t, test.kind, test.code, response, err)

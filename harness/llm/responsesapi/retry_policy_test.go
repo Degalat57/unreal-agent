@@ -108,6 +108,7 @@ func TestResponseRetryDelay(t *testing.T) {
 		message string
 		header  string
 		want    time.Duration
+		hinted  bool // the server hint, not the local backoff, decides the delay
 	}{
 		{name: "initial", attempt: 1, want: 2 * time.Second},
 		{name: "exponential", attempt: 3, want: 8 * time.Second},
@@ -115,12 +116,15 @@ func TestResponseRetryDelay(t *testing.T) {
 		{name: "overloaded", attempt: 1, code: "server_is_overloaded", want: 10 * time.Second},
 		{name: "slow down", attempt: 2, code: "slow_down", want: 20 * time.Second},
 		{name: "overload capped", attempt: 100, code: "slow_down", want: time.Minute},
-		{name: "message hint capped", attempt: 1, code: "rate_limit_exceeded", message: "try again in 3600s", want: 30 * time.Second},
-		{name: "header hint capped", attempt: 1, header: "86400", want: 30 * time.Second},
-		{name: "short hint", attempt: 1, code: "rate_limit_exceeded", message: "try again in 28ms", want: 28 * time.Millisecond},
-		{name: "longer hint wins", attempt: 1, code: "rate_limit_exceeded", message: "try again in 20s", header: "10", want: 20 * time.Second},
-		{name: "header beats message", attempt: 1, code: "rate_limit_exceeded", message: "try again in 10s", header: "20", want: 20 * time.Second},
-		{name: "invalid header uses message", attempt: 1, code: "rate_limit_exceeded", message: "try again in 5s", header: "invalid", want: 5 * time.Second},
+		{name: "long message hint", attempt: 1, code: "rate_limit_exceeded", message: "try again in 3600s", want: time.Hour, hinted: true},
+		{name: "long header hint", attempt: 1, header: "86400", want: 24 * time.Hour, hinted: true},
+		{name: "header beyond capped backoff", attempt: 100, header: "120", want: 2 * time.Minute, hinted: true},
+		{name: "short hint keeps backoff", attempt: 1, code: "rate_limit_exceeded", message: "try again in 28ms", want: 2 * time.Second},
+		{name: "short header keeps capped backoff", attempt: 100, header: "2", want: 30 * time.Second},
+		{name: "short header keeps overload backoff", attempt: 1, code: "server_is_overloaded", header: "5", want: 10 * time.Second},
+		{name: "longer hint wins", attempt: 1, code: "rate_limit_exceeded", message: "try again in 20s", header: "10", want: 20 * time.Second, hinted: true},
+		{name: "header beats message", attempt: 1, code: "rate_limit_exceeded", message: "try again in 10s", header: "20", want: 20 * time.Second, hinted: true},
+		{name: "invalid header uses message", attempt: 1, code: "rate_limit_exceeded", message: "try again in 5s", header: "invalid", want: 5 * time.Second, hinted: true},
 		{name: "ignore non-rate-limit message", attempt: 1, code: "server_error", message: "try again in 120s", want: 2 * time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -135,7 +139,8 @@ func TestResponseRetryDelay(t *testing.T) {
 				if delay < test.want*4/5 || delay > test.want {
 					t.Fatalf("jittered delay = %s", delay)
 				}
-				if (test.header != "" || test.code == "rate_limit_exceeded") && delay != got {
+				// Jitter only shortens the local backoff; a winning server hint is exact.
+				if test.hinted && delay != got {
 					t.Fatal("jitter shortened the server hint")
 				}
 			}

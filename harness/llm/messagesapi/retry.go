@@ -29,18 +29,30 @@ func retryableResponseError(err *APIError, headers http.Header) bool {
 }
 
 func responseRetryDelay(policy primitives.RemoteRetryPolicy, attempt int, headers http.Header, now time.Time, jitter float64) time.Duration {
+	delay := policy.Backoff(attempt)
+	delay -= time.Duration(float64(delay/5) * jitter)
+	// The server hint is a floor, not a ceiling: the server knows when the
+	// request can succeed, while MaxBackoff only bounds blind local retries.
+	return max(retryAfterHint(headers, now), delay)
+}
+
+func retryAfterHint(headers http.Header, now time.Time) time.Duration {
 	for _, hint := range []struct {
 		value string
 		unit  time.Duration
 	}{{headers.Get("Retry-After-Ms"), time.Millisecond}, {headers.Get("Retry-After"), time.Second}} {
 		if number, err := strconv.ParseFloat(strings.TrimSpace(hint.value), 64); err == nil && number > 0 && !math.IsInf(number, 0) {
-			nanos := min(number*float64(hint.unit), float64(policy.MaxBackoff))
+			// Without the old MaxBackoff clamp the product can exceed the
+			// Duration range; converting such a float is undefined, so saturate.
+			nanos := number * float64(hint.unit)
+			if nanos >= float64(math.MaxInt64) {
+				return time.Duration(math.MaxInt64)
+			}
 			return time.Duration(nanos)
 		}
 	}
 	if deadline, err := http.ParseTime(headers.Get("Retry-After")); err == nil && deadline.After(now) {
-		return min(deadline.Sub(now), policy.MaxBackoff)
+		return deadline.Sub(now) // saturates at the Duration range
 	}
-	delay := policy.Backoff(attempt)
-	return delay - time.Duration(float64(delay/5)*jitter)
+	return 0
 }

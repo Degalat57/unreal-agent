@@ -41,16 +41,16 @@ func responseRetryDelay(policy primitives.RemoteRetryPolicy, attempt int, err *A
 	if err != nil && err.Code == "rate_limit_exceeded" {
 		hint = max(hint, retryAfterMessage(err.Message))
 	}
-	if hint > 0 {
-		return min(hint, policy.MaxBackoff)
-	}
 	if err != nil && (err.Code == "server_is_overloaded" || err.Code == "slow_down") {
 		// Unlike the Codex CLI, unattended runs retry overloads with a longer backoff.
 		policy.InitialBackoff = 10 * time.Second
 		policy.MaxBackoff = time.Minute
 	}
 	delay := policy.Backoff(attempt)
-	return delay - time.Duration(float64(delay/5)*jitter)
+	delay -= time.Duration(float64(delay/5) * jitter)
+	// The server hint is a floor, not a ceiling: the server knows when the
+	// request can succeed, while MaxBackoff only bounds blind local retries.
+	return max(hint, delay)
 }
 
 func retryAfterHeader(value string, now time.Time) time.Duration {
