@@ -48,8 +48,15 @@ func (current *builder) NeedsCompaction() bool {
 }
 
 // Compact rebuilds from a compaction response without changing the original builder.
+// It keeps the original builder when nothing is eligible for compaction or the
+// response carries no usable summary, so a degenerate response never replaces
+// the active context.
 func (current *builder) Compact(response llm.Response) (Builder, bool) {
 	cutoff, ok := current.compactionCutoff()
+	if !ok {
+		return current, false
+	}
+	summary, ok := compactionSummary(response)
 	if !ok {
 		return current, false
 	}
@@ -60,26 +67,27 @@ func (current *builder) Compact(response llm.Response) (Builder, bool) {
 	for _, tool := range current.request.Tools {
 		rebuilt.AddTool(tool)
 	}
-	rebuilt.addCompactionSummary(response)
+	rebuilt.stageItems(llm.Item{Type: llm.ItemMessage, Data: llm.Message{
+		Role: llm.RoleUser,
+		Text: summary,
+	}})
 	rebuilt.carryForwardContext(current, start)
 	return rebuilt, true
 }
 
-func (current *builder) addCompactionSummary(response llm.Response) {
-	var summary string
+// compactionSummary returns the last nonblank assistant message of a compaction
+// response. Reasoning, tool calls, user-role items and blank messages do not count.
+func compactionSummary(response llm.Response) (string, bool) {
 	for _, item := range slices.Backward(response.Output) {
-		if item.Type == llm.ItemMessage {
-			message := item.Data.(llm.Message)
-			if message.Role == llm.RoleAssistant && strings.TrimSpace(message.Text) != "" {
-				summary = message.Text
-				break
-			}
+		if item.Type != llm.ItemMessage {
+			continue
+		}
+		message := item.Data.(llm.Message)
+		if message.Role == llm.RoleAssistant && strings.TrimSpace(message.Text) != "" {
+			return message.Text, true
 		}
 	}
-	current.stageItems(llm.Item{Type: llm.ItemMessage, Data: llm.Message{
-		Role: llm.RoleUser,
-		Text: summary,
-	}})
+	return "", false
 }
 
 // compactionCutoff returns the last checkpoint to summarize, retaining whole turns within the budget.

@@ -169,7 +169,7 @@ func TestCompactionResponsePreservesPendingWork(t *testing.T) {
 				current.dependencies.ContextBuilder = newStopTestRun(t, 0).current.dependencies.ContextBuilder
 			}
 			previous := current.dependencies.ContextBuilder
-			response := llm.Response{Stop: llm.StopComplete}
+			response := llm.Response{Stop: llm.StopComplete, Output: textResponse("Summary").Output}
 			if outcome == "refused" {
 				response.Stop = llm.StopRefused
 			}

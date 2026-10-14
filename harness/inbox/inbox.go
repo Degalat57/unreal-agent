@@ -53,6 +53,12 @@ const (
 	StopWhenIdle   ControlMode = "when_idle"
 	Heartbeat      ControlMode = "heartbeat"
 	UpdateSettings ControlMode = "settings"
+	// Compact requests one compaction turn even when automatic compaction is
+	// disabled or the context is below its threshold.
+	Compact ControlMode = "compact"
+	// CompactionDisabled is posted by the coordinator after repeated compaction
+	// attempts produced no usable summary. Reason carries the user-facing text.
+	CompactionDisabled ControlMode = "compaction_disabled"
 )
 
 type Settings struct {
@@ -85,10 +91,10 @@ func (input Input) DecodeControlMessage() (ControlMessage, error) {
 		return ControlMessage{}, fmt.Errorf("control mode %q does not accept parameters", request.Mode)
 	}
 	switch request.Mode {
-	case StopHard, StopWhenIdle:
-	case Heartbeat:
+	case StopHard, StopWhenIdle, Compact:
+	case Heartbeat, CompactionDisabled:
 		if request.Reason == "" {
-			return ControlMessage{}, fmt.Errorf("heartbeat reason is empty")
+			return ControlMessage{}, fmt.Errorf("%s reason is empty", request.Mode)
 		}
 	case UpdateSettings:
 		if len(envelope.Parameters) == 0 || string(envelope.Parameters) == "null" {

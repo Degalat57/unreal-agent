@@ -53,6 +53,12 @@ type loopState struct {
 	callModel         bool
 	grace             <-chan time.Time
 	graceToolCalls    map[toolCallKey]struct{}
+	// Compaction bookkeeping is derived from recorded history so that live
+	// execution and replay agree on it.
+	compactionFailures  int            // Consecutive compaction responses without a usable summary.
+	autoCompactionOff   bool           // Set once compactionFailures reaches the configured limit.
+	compactionRequested bool           // A Compact control arrived since the last turn started.
+	compactionResponse  session.TurnID // Compaction turn whose response was already applied or rejected.
 }
 
 type toolCallState struct {
@@ -89,6 +95,9 @@ func newLoopState() loopState {
 func (current *coordinator) Run(ctx context.Context) error {
 	if current.dependencies.ToolHeartbeatInterval < 0 {
 		return fmt.Errorf("tool heartbeat interval must not be negative")
+	}
+	if current.dependencies.MaxCompactionAttempts < 0 {
+		return fmt.Errorf("max compaction attempts must not be negative")
 	}
 	if err := current.restore(ctx); err != nil {
 		return err
@@ -350,7 +359,7 @@ func (current *coordinator) cancelOperations() error {
 }
 
 func (current *coordinator) buildModelRequest() (llm.Request, session.TurnType, error) {
-	if current.dependencies.ContextBuilder.NeedsCompaction() {
+	if current.shouldCompact() {
 		if built, err := current.dependencies.ContextBuilder.BuildCompaction(); err == nil {
 			return built.Request, session.TurnCompaction, nil
 		}
@@ -433,6 +442,12 @@ func (current *coordinator) handleInboxInput(ctx context.Context, input inbox.In
 			return nil
 		case inbox.StopHard, inbox.StopWhenIdle:
 			current.acceptStop(request)
+		case inbox.Compact:
+			// Only start a turn when there is history to summarize; the
+			// request flag itself is recorded by addItemToLocalState.
+			if _, err := current.dependencies.ContextBuilder.BuildCompaction(); err == nil {
+				current.state.callModel = true
+			}
 		}
 	}
 	current.clearToolGrace()
@@ -476,6 +491,7 @@ func (current *coordinator) handleModelResponse(
 	ctx context.Context,
 	response sessionstore.ModelResponse,
 ) ([]sessionstore.ToolCallStatus, error) {
+	failuresBefore := current.state.compactionFailures
 	item, err := current.addItemToLocalState(sessionstore.Item{
 		Kind: sessionstore.ItemModelResponse,
 		Data: response,
@@ -486,6 +502,11 @@ func (current *coordinator) handleModelResponse(
 	if err := current.storeItemInSessionStore(ctx, item); err != nil {
 		return nil, err
 	}
+	if current.state.compactionFailures > failuresBefore && current.state.autoCompactionOff {
+		if err := current.postCompactionDisabled(ctx); err != nil {
+			return nil, err
+		}
+	}
 	statuses, err := current.scheduleToolCalls(ctx)
 	if err != nil {
 		return nil, err
@@ -494,14 +515,55 @@ func (current *coordinator) handleModelResponse(
 	return statuses, nil
 }
 
+// shouldCompact reports whether the next turn is a compaction turn: either the
+// user asked for one, or the context is under pressure and automatic compaction
+// is still enabled.
+func (current *coordinator) shouldCompact() bool {
+	if current.state.compactionRequested {
+		return true
+	}
+	return !current.state.autoCompactionOff && current.dependencies.ContextBuilder.NeedsCompaction()
+}
+
+func (current *coordinator) maxCompactionAttempts() int {
+	if current.dependencies.MaxCompactionAttempts > 0 {
+		return current.dependencies.MaxCompactionAttempts
+	}
+	return DefaultMaxCompactionAttempts
+}
+
+// applyCompactionResponse replaces the context when the response carries a
+// usable summary and keeps it otherwise. It tracks consecutive unusable
+// responses and disables automatic compaction once they reach the limit; a
+// usable summary resets the count and re-enables automatic compaction.
 func (current *coordinator) applyCompactionResponse(response llm.Response) {
-	if response.Stop != llm.StopComplete {
-		return
+	if response.Stop == llm.StopComplete {
+		if rebuilt, compacted := current.dependencies.ContextBuilder.Compact(response); compacted {
+			current.dependencies.ContextBuilder = rebuilt
+			current.state.compactionFailures = 0
+			current.state.autoCompactionOff = false
+			return
+		}
 	}
-	rebuilt, compacted := current.dependencies.ContextBuilder.Compact(response)
-	if compacted {
-		current.dependencies.ContextBuilder = rebuilt
+	current.state.compactionFailures++
+	if current.state.compactionFailures >= current.maxCompactionAttempts() {
+		current.state.autoCompactionOff = true
 	}
+}
+
+const compactionDisabledReason = "Compaction failed: %d consecutive compaction attempts returned no usable summary, so the context was left unchanged. Automatic compaction is now off for this session. Run compaction manually (control message %q) when ready; a successful compaction turns automatic compaction back on."
+
+func (current *coordinator) postCompactionDisabled(ctx context.Context) error {
+	payload, err := json.Marshal(inbox.ControlMessage{
+		Mode:   inbox.CompactionDisabled,
+		Reason: fmt.Sprintf(compactionDisabledReason, current.state.compactionFailures, inbox.Compact),
+	})
+	if err != nil {
+		return fmt.Errorf("encode compaction notice: %w", err)
+	}
+	return current.dependencies.Inbox.Submit(ctx, inbox.Input{
+		ID: inbox.ID(uuid.New().String()), Kind: inbox.InputControl, Payload: payload,
+	})
 }
 
 func (current *coordinator) handleOperationUpdate(
@@ -610,8 +672,11 @@ func (current *coordinator) addItemToLocalState(
 				return sessionstore.Item{}, err
 			}
 			current.dependencies.ContextBuilder.AddControlMessage(request)
-			if request.Mode == inbox.Heartbeat {
+			switch request.Mode {
+			case inbox.Heartbeat:
 				current.state.availableInputs++
+			case inbox.Compact:
+				current.state.compactionRequested = true
 			}
 		}
 
@@ -626,6 +691,7 @@ func (current *coordinator) addItemToLocalState(
 		current.state.currentTurnID = turn.ID
 		current.state.currentTurnType = turn.Type
 		current.state.currentTurnInputs = current.state.availableInputs
+		current.state.compactionRequested = false
 		if turn.Type != session.TurnCompaction {
 			current.dependencies.ContextBuilder.Commit()
 		}
@@ -639,7 +705,11 @@ func (current *coordinator) addItemToLocalState(
 			)
 		}
 		if current.state.currentTurnType == session.TurnCompaction && response.TurnID == current.state.currentTurnID {
-			current.applyCompactionResponse(response.Response)
+			// A repeated response for the same turn neither re-applies nor re-counts.
+			if response.TurnID != current.state.compactionResponse {
+				current.state.compactionResponse = response.TurnID
+				current.applyCompactionResponse(response.Response)
+			}
 			return item, nil
 		}
 		// The complete output includes messages, reasoning, and tool calls.

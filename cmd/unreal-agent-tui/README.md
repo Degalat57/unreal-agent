@@ -43,6 +43,11 @@ Turbo Vision is the default theme. Use `-theme lite` for the original Lite palet
 
 Workspace skills are loaded from `.harness/skills/*/SKILL.md`.
 
+Send `/compact` on its own to run one context compaction now. When repeated
+compactions return no usable summary, the harness keeps the context, turns
+automatic compaction off for the session and shows a "Compaction failed" notice;
+`/compact` still works and a successful one turns automatic compaction back on.
+
 Type `@` in a message to search workspace filenames. Matching is case-insensitive
 and fuzzy, using [sahilm/fuzzy](https://github.com/sahilm/fuzzy).
 Filename matches rank ahead of directory matches;

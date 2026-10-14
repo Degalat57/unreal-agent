@@ -14,8 +14,16 @@ import (
 	"github.com/unreallabsai/unreal-agent/harness/tool"
 )
 
+// DefaultMaxCompactionAttempts bounds consecutive compaction responses without
+// a usable summary before automatic compaction is disabled for the session.
+const DefaultMaxCompactionAttempts = 3
+
 type Dependencies struct {
 	ToolHeartbeatInterval time.Duration
+	// MaxCompactionAttempts is the number of consecutive compaction responses
+	// without a usable summary tolerated before automatic compaction is
+	// disabled for the session. Zero selects DefaultMaxCompactionAttempts.
+	MaxCompactionAttempts int
 	SessionID             session.ID
 	Inbox                 *inbox.Inbox
 	Restored              sessionstore.ResumeState

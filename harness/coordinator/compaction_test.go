@@ -115,11 +115,16 @@ func TestCompactionResponseStatusOnLiveAndReplay(t *testing.T) {
 		stop    llm.StopReason
 		failure *llm.Failure
 		output  []llm.Item
+		usable  bool
 	}{
 		{name: "truncated summary", stop: llm.StopMaxOutputTokens, output: textResponse("Partial summary").Output},
 		{name: "refusal", stop: llm.StopRefused, output: textResponse("Cannot summarize").Output},
 		{name: "failure", failure: &llm.Failure{Code: "server_error", Message: "failed"}, output: textResponse("Summary").Output},
 		{name: "empty output", stop: llm.StopComplete},
+		{name: "whitespace summary", stop: llm.StopComplete, output: textResponse(" \n\t").Output},
+		{name: "tool call only", stop: llm.StopComplete, output: []llm.Item{{Type: llm.ItemToolCall, Data: llm.ToolCall{CallID: "call", Name: "unknown", Arguments: `{}`}}}},
+		{name: "user message only", stop: llm.StopComplete, output: []llm.Item{{Type: llm.ItemMessage, Data: llm.Message{Role: llm.RoleUser, Text: "Summary"}}}},
+		{name: "usable summary", stop: llm.StopComplete, output: textResponse("Summary").Output, usable: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			current, directory := recordedCompactionHistory(t)
@@ -137,12 +142,15 @@ func TestCompactionResponseStatusOnLiveAndReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.stop != llm.StopComplete {
+			if !test.usable {
 				if current.dependencies.ContextBuilder != oldBuilder || !reflect.DeepEqual(live, before) {
-					t.Fatal("unsuccessful compaction changed live context")
+					t.Fatal("unusable compaction changed live context")
 				}
-			} else if current.dependencies.ContextBuilder == oldBuilder {
-				t.Fatal("completed response did not replace context")
+				if current.state.compactionFailures != 1 || current.state.autoCompactionOff {
+					t.Fatalf("unusable compaction bookkeeping = %+v", current.state)
+				}
+			} else if current.dependencies.ContextBuilder == oldBuilder || current.state.compactionFailures != 0 {
+				t.Fatal("usable summary did not replace context")
 			}
 			reopened, err := localfile.New(directory)
 			if err != nil {

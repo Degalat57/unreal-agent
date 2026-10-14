@@ -11,7 +11,7 @@ import (
 )
 
 func TestInboxControlMessages(t *testing.T) {
-	for _, mode := range []inbox.ControlMode{inbox.StopHard, inbox.StopWhenIdle, inbox.Heartbeat} {
+	for _, mode := range []inbox.ControlMode{inbox.StopHard, inbox.StopWhenIdle, inbox.Heartbeat, inbox.Compact, inbox.CompactionDisabled} {
 		t.Run(string(mode), func(t *testing.T) {
 			want := inbox.ControlMessage{Mode: mode, Reason: "stop now"}
 			payload, err := json.Marshal(want)
@@ -52,6 +52,9 @@ func TestInboxRejectsInvalidControlMessages(t *testing.T) {
 		`{"Mode":"heartbeat"}`,
 		`{"Mode":"heartbeat","Reason":""}`,
 		`{"Mode":"heartbeat","Reason":null}`,
+		`{"Mode":"compact","Parameters":{"ReasoningEffort":"high"}}`,
+		`{"Mode":"compaction_disabled"}`,
+		`{"Mode":"compaction_disabled","Reason":""}`,
 		`{"Mode":"settings"}`,
 		`{"Mode":"settings","Parameters":null}`,
 		`{"Mode":"settings","Parameters":[]}`,

@@ -51,6 +51,9 @@ var (
 	reasoningKey = key.NewBinding(key.WithKeys("f3"), key.WithHelp("F3", "hide reasoning"))
 )
 
+// compactCommand, sent alone, requests one compaction turn instead of a message.
+const compactCommand = "/compact"
+
 type submitted struct {
 	text string
 	err  error
@@ -324,9 +327,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.composer.Reset()
 			m.sending = true
 			cmd = func() tea.Msg {
-				payload, err := json.Marshal(text)
+				input, err := composeInput(text)
 				if err == nil {
-					err = m.inputs.Submit(m.ctx, inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputExternal, Payload: payload})
+					err = m.inputs.Submit(m.ctx, input)
 				}
 				return submitted{text: text, err: err}
 			}
@@ -351,6 +354,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// composeInput turns composer text into the input to submit: the compact
+// command alone becomes a Compact control, anything else an external message.
+func composeInput(text string) (inbox.Input, error) {
+	input := inbox.Input{ID: inbox.ID(uuid.New().String()), Kind: inbox.InputExternal}
+	var err error
+	if strings.TrimSpace(text) == compactCommand {
+		input.Kind = inbox.InputControl
+		input.Payload, err = json.Marshal(inbox.ControlMessage{Mode: inbox.Compact})
+	} else {
+		input.Payload, err = json.Marshal(text)
+	}
+	return input, err
+}
+
 func (m *model) append(label, text string) {
 	text = terminaltext.Clean(text)
 	if (label == "Agent" || label == "Reasoning" || label == "Provider") && strings.TrimSpace(text) == "" {
@@ -367,10 +384,15 @@ func (m *model) append(label, text string) {
 func (m *model) apply(item sessionstore.Item) {
 	switch data := item.Data.(type) {
 	case inbox.Input:
-		if data.Kind == inbox.InputExternal {
+		switch data.Kind {
+		case inbox.InputExternal:
 			var text string
 			if json.Unmarshal(data.Payload, &text) == nil {
 				m.append("You", text)
+			}
+		case inbox.InputControl:
+			if request, err := data.DecodeControlMessage(); err == nil && request.Mode == inbox.CompactionDisabled {
+				m.append("Compaction failed", request.Reason)
 			}
 		}
 	case session.Turn:
@@ -465,7 +487,7 @@ func (m *model) renderConversation() {
 		case "You":
 			style = style.Foreground(lipgloss.Color(m.theme.UserForeground)).Background(lipgloss.Color(m.theme.User)).Padding(1, 1, 1, 2)
 		case "Agent":
-		case "Run failed", "Model failed", "Send failed", "Skill error":
+		case "Run failed", "Model failed", "Send failed", "Skill error", "Compaction failed":
 			color = m.theme.Error
 		default:
 			style = style.Foreground(lipgloss.Color(m.theme.Muted))
